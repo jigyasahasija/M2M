@@ -1,6 +1,7 @@
 import time
 import numpy as np
 import argparse
+import math
 
 from src import graph, simulate, task_allocation, case_request_generator, router, agent
 from src.analysis import statistics
@@ -77,10 +78,9 @@ def execute(S : statistics.Stats, map : str, Rs : agent.AgentLoader, G : graph.G
         print("=============================" +"Routing"+ "=============================")
         tik = time.time()     
         
-        for agent in Rs.agents:
-            if agent.path_sequence == []:
-                Rs = router.pathPlan(map, Rs, path_planning_strategy, S)
-                break    
+        # DCBS replans every tick; the other planners refresh exhausted paths.
+        if path_planning_strategy == "dcbs" or any(not agent.path_sequence for agent in Rs.agents):
+            Rs = router.pathPlan(map, Rs, path_planning_strategy, S, G=G)
 
         tok = time.time()
         S.add_total_PF_time(tok-tik)
@@ -136,7 +136,7 @@ def main(seed: int, num_robots: int, T: int, max_number_tasks: int,
          base_cost_weight: float = 1.0,
          deadline_weight: float = 0.0,
          sku_distribution_weight: float = 0.0,
-         agent_unallocated_penalty: float = 0.0) -> None:
+         agent_unallocated_penalty: float = 0.0, agent_capacity: float = 1, task_weight: float = 1) -> None:
     """
     Run a single instance of the simulation with specified parameters.
     
@@ -168,15 +168,31 @@ def main(seed: int, num_robots: int, T: int, max_number_tasks: int,
         deadline_weight: Weight for deadline
         sku_distribution_weight: Weight for sku distribution
         agent_unallocated_penalty: Weight for agent unallocated penalty
+        agent_capacity: Maximum reserved and carried weight for CBTA
+        task_weight: Positive weight of each generated task
     """
+    if not math.isfinite(task_weight) or task_weight <= 0:
+        raise ValueError("task_weight must be finite and positive")
+    if task_weight != 1 and improvement_task_assignment_strategy != "cbta_dcbs":
+        raise ValueError("Weighted tasks currently require cbta_dcbs")
+    if not math.isfinite(agent_capacity) or agent_capacity <= 0:
+        raise ValueError("agent_capacity must be positive")
+    if agent_capacity != 1 and improvement_task_assignment_strategy != "cbta_dcbs":
+        raise ValueError("Multi-item capacity currently requires cbta_dcbs")
+    if improvement_task_assignment_strategy == "cbta_dcbs":
+        path_planning_strategy = "dcbs"
+    elif path_planning_strategy == "dcbs":
+        raise ValueError("dcbs routing requires cbta_dcbs task assignment")
     np.random.seed(seed)
     
     stripped_map_name = map_name.split("/")[-1].replace(".json", "")
     
-    output_file = f"data/raw_data/{T}_{task_generation_strategy}_{initial_inventory}_{initial_task_assignment_strategy}_{improvement_task_assignment_strategy}_{path_planning_strategy}_{stripped_map_name}_{num_robots}_{max_number_tasks}_{base_cost_weight}_{deadline_weight}_{sku_distribution_weight}_{seed}.json"
+    output_file = f"data/raw_data/{T}_{task_generation_strategy}_{initial_inventory}_{initial_task_assignment_strategy}_{improvement_task_assignment_strategy}_{path_planning_strategy}_{stripped_map_name}_{num_robots}_{max_number_tasks}_{base_cost_weight}_{deadline_weight}_{sku_distribution_weight}_{seed}_capacity{agent_capacity:g}_weight{task_weight:g}.json"
 
     S = statistics.Stats(
         num_robots=num_robots,
+        agent_capacity=agent_capacity,
+        task_weight=task_weight,
         simulation_time=T,
         output_file=output_file,
         map_name=map_name,
@@ -209,7 +225,7 @@ def main(seed: int, num_robots: int, T: int, max_number_tasks: int,
 
     robots = []
     for robot_id, location in enumerate(G.get_all_occupied()):
-        robots.append(agent.Agent(robot_id, location))
+        robots.append(agent.Agent(robot_id, location, capacity=agent_capacity))
     
     Rs = agent.AgentLoader(robots)
     
@@ -247,6 +263,8 @@ def main(seed: int, num_robots: int, T: int, max_number_tasks: int,
 if __name__=="__main__":
     parser = argparse.ArgumentParser(description='Run grid world simulation with specified parameters')
     
+    parser.add_argument('--agent-capacity', type=float, default=1, help='Weight capacity per robot; nondefault values require cbta_dcbs')
+    parser.add_argument('--task-weight', type=float, default=1, help='Positive weight per generated task (CBTA); defaults to 1')
     parser.add_argument('--seed', type=int, required=True, help='Random seed for reproducibility')
     parser.add_argument('--num-robots', type=int, required=True, help='Number of robots')
     parser.add_argument('--time-horizon', type=int, required=True, help='Time horizon T')
@@ -258,10 +276,10 @@ if __name__=="__main__":
                        choices=['cost_matrix', 'random', 'greedy', 'randomized_greedy', 'FCF', 'max_regret_FC', 'randomized_max_regret_FC', 'fast_greedy', 'fast_FCF', 'fast_SCF'],
                        help='Task assignment strategy')
     parser.add_argument('--improvement-task-assign-strategy', type=str, required=True,
-                       choices=['M2M', 'LNS_PBS', 'none'],
+                       choices=['M2M', 'LNS_PBS', 'cbta_dcbs', 'none'],
                        help='Task assignment strategy for improvement')
     parser.add_argument('--path-planning-strategy', type=str, required=True,
-                       choices=['ecbs', 'pbs'],
+                       choices=['ecbs', 'pbs', 'dcbs'],
                        help='Path planning strategy')
     parser.add_argument('--map', type=str, default='data/maps/symbotic_small',
                        help='Map file path')
@@ -291,15 +309,17 @@ if __name__=="__main__":
     parser.add_argument('--T-0', type=float, default=1.0, help='Initial temperature for simulated annealing')
     parser.add_argument('--alpha', type=float, default=0.99, help='Temperature decay rate for simulated annealing')
     parser.add_argument('--deadline-generation-method', type=str, default='constant',
-                       help='Method for generating task deadlines (e.g., constant, normal, bimodal, etc.)', choices=['constant', 'normal', 'bimodal', 'none'])
+                       help='Task deadline generation; none disables deadlines', choices=['constant', 'normal', 'bimodal', 'none'])
     parser.add_argument('--deadline-offset', type=float, default=30, help='Offset for task deadlines')
     parser.add_argument('--base-cost-weight', type=float, default=1.0, help='Weight for base cost')
-    parser.add_argument('--deadline-weight', type=float, default=0.0, help='Weight for deadline')
+    parser.add_argument('--deadline-weight', type=float, default=0.0, help='CBTA lateness cost weight: 0 disables the penalty; positive values enable it when tasks have deadlines')
     parser.add_argument('--sku-distribution-weight', type=float, default=0.0, help='Weight for sku distribution')
     parser.add_argument('--agent-unallocated-penalty', type=float, default=0.0, help='Penalty for unallocated agents')
     args = parser.parse_args()
     
     main(
+        agent_capacity=args.agent_capacity,
+        task_weight=args.task_weight,
         seed=args.seed,
         num_robots=args.num_robots,
         T=args.time_horizon,

@@ -19,26 +19,26 @@ def _refresh_tasks_after_warehouse_change(J : set, G : Graph, changed_task_id : 
             continue
 
         task_tuple = J[other_task_id]
-        start_locations, goal_locations, deadline, task_sku_id, task_type = task_tuple
+        start_locations, goal_locations, deadline, task_sku_id, task_type = task_tuple[:5]
 
         if task_sku_id == sku_id:
             if task_type == 0:
                 new_start_locs = frozenset(G.warehouse.get_sku_instances(sku_id))
                 new_goal_locs = frozenset(G.driveway.get_empty_locations())
-                J[other_task_id] = (new_start_locs, new_goal_locs, deadline, task_sku_id, task_type)
+                J[other_task_id] = (new_start_locs, new_goal_locs, deadline, task_sku_id, task_type) + task_tuple[5:]
                 continue
             elif task_type == 1:
                 new_goal_locs = frozenset(G.warehouse.get_empty_locations())
-                J[other_task_id] = (start_locations, new_goal_locs, deadline, task_sku_id, task_type)
+                J[other_task_id] = (start_locations, new_goal_locs, deadline, task_sku_id, task_type) + task_tuple[5:]
                 continue
         else:
             if task_type == 0:
                 new_goal_locs = frozenset(G.driveway.get_empty_locations())
-                J[other_task_id] = (start_locations, new_goal_locs, deadline, task_sku_id, task_type)
+                J[other_task_id] = (start_locations, new_goal_locs, deadline, task_sku_id, task_type) + task_tuple[5:]
                 continue
             elif task_type == 1:
                 new_goal_locs = frozenset(G.warehouse.get_empty_locations())
-                J[other_task_id] = (start_locations, new_goal_locs, deadline, task_sku_id, task_type)
+                J[other_task_id] = (start_locations, new_goal_locs, deadline, task_sku_id, task_type) + task_tuple[5:]
                 continue
 
 
@@ -71,7 +71,18 @@ def simulate(S : Stats, G : Graph, Rs : AgentLoader, J : Dict[int, Tuple], map_n
             agent.state = agent.path_sequence.pop(0)
             G.set_occupied(agent.state, True)
             
-            if agent.status == 1:
+            if agent.schedule is not None:
+                # Each carried item's travel includes detours for other events.
+                for task_id in agent.carried_items:
+                    if old_state != agent.state:
+                        S.update_actual_distance(task_id, 1)
+                    S.update_actual_duration(task_id, S.get_actual_duration(task_id) + 1)
+                if agent.status == 1:
+                    task_id = agent.task_sequence[0][0]
+                    if old_state != agent.state:
+                        S.update_actual_pickup_distance(task_id, 1)
+                    S.update_actual_pickup_duration(task_id, S.get_actual_pickup_duration(task_id) + 1)
+            elif agent.status == 1:
                 if old_state != agent.state:
                     S.update_actual_pickup_distance(agent.task_sequence[0][0], 1)
                 S.update_actual_pickup_duration(agent.task_sequence[0][0], S.get_actual_pickup_duration(agent.task_sequence[0][0]) + 1)
@@ -94,8 +105,6 @@ def simulate(S : Stats, G : Graph, Rs : AgentLoader, J : Dict[int, Tuple], map_n
     S.add_aisle_occupancy(G.get_aisle_occupancy())
     S.add_driveway_occupancy(G.get_driveway_occupancy())
     
-    S.append_carrying_skus(Rs.get_all_agent_carrying_skus())
-    
     for agent in Rs.agents:
         if agent.status == 1:
             if agent.state == agent.task_sequence[0][1]:
@@ -104,6 +113,16 @@ def simulate(S : Stats, G : Graph, Rs : AgentLoader, J : Dict[int, Tuple], map_n
                 start_location = task[1]
                 goal_location = task[2]
                 deadline = task[3]
+
+                if agent.schedule is not None:
+                    if agent.carried_weight + task_weight(agent.task_sequence[0]) > agent.capacity + 1e-9:
+                        raise ValueError("Pickup would exceed robot capacity")
+                    inventory = (G.warehouse if start_location in G.warehouse.get_full_locations()
+                                 else G.driveway)
+                    if start_location not in inventory.get_full_locations():
+                        raise ValueError(f"No inventory at pickup {start_location}")
+                    if inventory.get_sku_at_location(start_location).sku_id != J[task_id][3]:
+                        raise ValueError(f"Wrong SKU at pickup for task {task_id}")
                 
                 # Outbound or warehouse-based pickup
                 if start_location in G.warehouse.get_full_locations():
@@ -143,7 +162,11 @@ def simulate(S : Stats, G : Graph, Rs : AgentLoader, J : Dict[int, Tuple], map_n
                         print(f"[WARN] Could not remove SKU from driveway at {start_location}: {e}")
 
                 S.add_completed_to_pickup_task_id(task_id)
-                agent.status = 2
+                if agent.schedule is not None:
+                    agent.schedule.pop(0)
+                    agent.sync_schedule()
+                else:
+                    agent.status = 2
         elif agent.status == 2:
             if agent.state == agent.task_sequence[0][2]:
                 task = agent.task_sequence[0]
@@ -158,6 +181,9 @@ def simulate(S : Stats, G : Graph, Rs : AgentLoader, J : Dict[int, Tuple], map_n
 
                 if sku_id != agent.get_sku_id_carrying():
                     raise ValueError(f"Agent {agent.id} carrying sku {agent.get_sku_id_carrying()} but task {task_id} requires sku {sku_id} ... Exiting")
+
+                if agent.schedule is not None and goal_location not in (set(G.warehouse.get_empty_locations()) | set(G.driveway.get_empty_locations())):
+                    raise ValueError(f"Delivery location {goal_location} is occupied")
 
                 # Inbound task: dropping off to warehouse
                 if goal_location in G.warehouse.get_empty_locations():
@@ -178,6 +204,10 @@ def simulate(S : Stats, G : Graph, Rs : AgentLoader, J : Dict[int, Tuple], map_n
                 J.pop(task_id)
                     
                 agent.task_sequence.pop(0)
+                if agent.schedule is not None:
+                    agent.schedule.pop(0)
+                    agent.sync_schedule()
+                    continue
                 if agent.task_sequence == []:
                     agent.status = 0
                 else:
@@ -202,4 +232,5 @@ def simulate(S : Stats, G : Graph, Rs : AgentLoader, J : Dict[int, Tuple], map_n
                     if t <= 100:
                         S.append_early_task_ids(new_task_id)
                         
+    S.append_carrying_skus(Rs.get_all_agent_carrying_skus())
     return Rs, J

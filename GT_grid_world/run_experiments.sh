@@ -1,14 +1,16 @@
 #!/bin/bash
-
-# Create directories if they don't exist
-mkdir -p data/raw_data
+set -euo pipefail
 
 #Init absolute path
 parent_path=$( cd "$(dirname "${BASH_SOURCE[0]}")" ; pwd -P )
+cd "$parent_path/.."
+mkdir -p data/raw_data
 
 # Define arrays of parameters to test
 seeds=(900)
 num_robots=(40)
+agent_capacity=2
+task_weight=1
 time_horizons=(10)
 max_tasks=(120)
 frequencies=(0.25)
@@ -18,18 +20,21 @@ initial_inventory=(30.0)
 weight_init_method="uniform"
 task_gen_strategy="feedback_control"
 initial_task_assign_strategy="fast_greedy"
-improvement_task_assign_strategy="LNS_PBS"
+improvement_task_assign_strategy="cbta_dcbs"
 cost_calculation_method="shortest_path"
-path_planning_strategy="pbs"
+path_planning_strategy="dcbs"
 map="data/maps/study_small_restricted"
 removal_operator="shaw"
 repair_operator="greedy"
 acceptance_function="simulated_annealing"
 T_0=1.0
 alpha=0.99
+# Use "none" for tasks without deadlines; otherwise constant/normal/bimodal.
 deadline_generation_method="normal"
 deadline_offset=180
 base_cost_weight=1.0
+# 0 disables deadline cost; a positive value penalizes estimated lateness.
+# With deadline_generation_method="none", CBTA ignores this penalty entirely.
 deadline_weight=0.0
 sku_distribution_weight=0.0
 agent_unallocated_penalty=5.0
@@ -44,6 +49,8 @@ for seed in "${seeds[@]}"; do
                         echo "Running experiment with:"
                         echo "  Seed: $seed"
                         echo "  Robots: $robots"
+                        echo "  Agent Capacity: $agent_capacity"
+                        echo "  Task Weight: $task_weight"
                         echo "  Time Horizon: $T"
                         echo "  Max Tasks: $max_task"
                         echo "  Frequency: $frequency"
@@ -65,10 +72,15 @@ for seed in "${seeds[@]}"; do
                         echo "  Sku Distribution Weight: $sku_distribution_weight"
                         echo "  Agent Unallocated Penalty: $agent_unallocated_penalty"
                         echo "----------------------------------------"
+                        if (( $# )); then
+                            echo "Command-line overrides: $*"
+                        fi
                         
-                        python3 $parent_path/GT_grid_world.py \
+                        "${PYTHON:-python3}" "$parent_path/GT_grid_world.py" \
                             --seed "$seed" \
                             --num-robots "$robots" \
+                            --agent-capacity "$agent_capacity" \
+                            --task-weight "$task_weight" \
                             --time-horizon "$T" \
                             --max-tasks "$max_task" \
                             --task-gen-strategy "$task_gen_strategy" \
@@ -93,7 +105,8 @@ for seed in "${seeds[@]}"; do
                             --base-cost-weight "$base_cost_weight" \
                             --deadline-weight "$deadline_weight" \
                             --sku-distribution-weight "$sku_distribution_weight" \
-                            --agent-unallocated-penalty "$agent_unallocated_penalty" 
+                            --agent-unallocated-penalty "$agent_unallocated_penalty" \
+                            "$@"
 
                         # Optional: Add a small delay between runs
                         sleep 1
@@ -104,4 +117,4 @@ for seed in "${seeds[@]}"; do
     done
 done
 
-echo "All experiments completed!" 
+echo "All experiments completed!"

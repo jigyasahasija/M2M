@@ -13,8 +13,15 @@ class Stats:
                  num_skus: int = None, weight_init_method: str = None, removal_operator: str = None, repair_operator: str = None,
                  acceptance_function: str = None, T_0: float = None, alpha: float = None, deadline_generation_method: str = None,
                  deadline_offset: float = None, base_cost_weight: float = None, deadline_weight: float = None,
-                 sku_distribution_weight: float = None, agent_unallocated_penalty: float = None) -> None:
+                 sku_distribution_weight: float = None, agent_unallocated_penalty: float = None, agent_capacity: float = 1, task_weight: float = 1) -> None:
         # Store input parameters
+        self.__generated_task_weight = task_weight
+        self.__task_weights = {}
+        self.__agent_carried_weights = []
+        self.__agent_reserved_weights = []
+        self.__agent_capacity = agent_capacity
+        self.__agent_loads = []
+        self.__agent_carried_tasks = []
         self.__seed = seed
         self.__num_of_robots = num_robots
         self.__T = simulation_time
@@ -155,11 +162,69 @@ class Stats:
         # Deadline tracking
         self.__task_deadlines = {}  # task_id -> deadline
         self.__overdue_task_completions = 0  # Counter for tasks completed after deadline
+        self.__assignment_cost_estimates = {}
 
         self.reallocation_data = {}
     
     def append_carrying_skus(self, skus : list) -> None:
         self.__carrying_skus.append(skus)
+
+    def get_generated_task_weight(self):
+        return self.__generated_task_weight
+
+    def record_task_weight(self, task_id, weight):
+        self.__task_weights[int(task_id)] = float(weight)
+
+    def record_assignment_cost(self, task_id: int, cost: float) -> None:
+        """Store CBTA's estimate at commitment, not a realized execution cost."""
+        self.__assignment_cost_estimates[int(task_id)] = float(cost)
+
+    def get_completion_metrics(self) -> dict:
+        generated = len(self.__task_release_timestamps)
+        completed = len(self.__completed_task_ids)
+        ratio = completed / generated if generated else None
+        return {
+            "total_generated_tasks": generated,
+            "total_uncompleted_tasks": generated - completed,
+            "completion_ratio": ratio,
+            "completion_percentage": 100 * ratio if ratio is not None else None,
+        }
+
+    def get_cbta_cost_metrics(self) -> dict:
+        """Realized costs cover completed tasks only, including pickup travel.
+
+        Lateness uses the simulator's recorded completion timestep. Waiting
+        contributes to lateness but is not counted as travel distance.
+        """
+        travel_weight = self.__base_cost_weight if self.__base_cost_weight is not None else 1.0
+        delay_weight = self.__deadline_weight or 0.0
+        details = {}
+        for task_id in self.__completed_task_ids:
+            travel = (self.__actual_pickup_distance.get(task_id, 0)
+                      + self.__actual_distance.get(task_id, 0))
+            deadline = self.__task_deadlines.get(task_id)
+            lateness = (max(0, self.__task_completion_timestamps[task_id] - deadline)
+                        if deadline is not None and self.__deadline_generation_method != "none" else 0)
+            details[task_id] = {
+                "travel_distance": float(travel),
+                "lateness_timesteps": float(lateness),
+                "travel_cost": float(travel_weight * travel),
+                "deadline_cost": float(delay_weight * lateness),
+                "total_cost": float(travel_weight * travel + delay_weight * lateness),
+            }
+        total = sum(item["total_cost"] for item in details.values())
+        return {
+            "cost_scope": "completed_tasks_only",
+            "completed_task_costs": details,
+            "total_completed_travel_distance": sum(item["travel_distance"] for item in details.values()),
+            "total_completed_lateness_timesteps": sum(item["lateness_timesteps"] for item in details.values()),
+            "total_travel_cost": sum(item["travel_cost"] for item in details.values()),
+            "total_deadline_cost": sum(item["deadline_cost"] for item in details.values()),
+            "sum_of_costs": total,
+            "average_task_cost": total / len(details) if details else 0.0,
+            "assignment_cost_estimates": self.__assignment_cost_estimates.copy(),
+            "total_estimated_assignment_cost": sum(self.__assignment_cost_estimates.values()),
+        }
     
     def get_num_skus(self) -> int:
         return self.__num_skus
@@ -585,6 +650,13 @@ class Stats:
         
         data = {
             # Input parameters from main
+            "task_weight": self.__generated_task_weight,
+            "task_weights": self.__task_weights,
+            "agent_carried_weight_per_timestep": self.__agent_carried_weights,
+            "agent_reserved_weight_per_timestep": self.__agent_reserved_weights,
+            "agent_capacity": self.__agent_capacity,
+            "agent_loads_per_timestep": self.__agent_loads,
+            "agent_carried_task_ids_per_timestep": self.__agent_carried_tasks,
             "seed": self.__seed,
             "num_robots": self.__num_of_robots,
             "time_horizon": self.__T,
@@ -667,6 +739,10 @@ class Stats:
             "sku_locations_per_timestep": self.__sku_locations_per_timestep,
         }
         
+        data.update(self.get_completion_metrics())
+        if self.__improvement_task_assignment_strategy == "cbta_dcbs":
+            data.update(self.get_cbta_cost_metrics())
+
         if intermediate_output_file is not None:
             with open(intermediate_output_file, "w") as f:
                 json.dump(data, f, ensure_ascii=False, indent=4)
@@ -772,6 +848,10 @@ class Stats:
                 
             agent_goal_locations.append(goal_location)
         
+        self.__agent_carried_weights.append([a.carried_weight if a.schedule is not None else int(a.get_sku_id_carrying() is not None) for a in Rs.agents])
+        self.__agent_reserved_weights.append([a.assigned_weight for a in Rs.agents])
+        self.__agent_loads.append([len(a.carried_items) if a.schedule is not None else int(a.get_sku_id_carrying() is not None) for a in Rs.agents])
+        self.__agent_carried_tasks.append([list(a.carried_items) if a.schedule is not None else ([a.task_sequence[0][0]] if a.status == 2 else []) for a in Rs.agents])
         self.__agent_statuses_per_timestep.append(agent_statuses)
         self.__agent_goal_locations_per_timestep.append(agent_goal_locations)
         self.__agent_task_per_timestep.append(agent_tasks)

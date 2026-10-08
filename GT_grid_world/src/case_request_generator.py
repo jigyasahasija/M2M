@@ -58,7 +58,7 @@ def CRG(S: Stats, t: int, J: Dict[int, Tuple], G: Graph, Rs: AgentLoader, N: int
                 if not goal_locations:
                     continue
                 
-                deadline = get_deadline(t)
+                deadline = get_deadline(t, deadline_generation_method, deadline_offset)
                 J[last_task_id + 1] = (start_locations, goal_locations, deadline, 0, 1)
                 S.add_task_release(last_task_id + 1, t)
                 S.add_task_deadline(last_task_id + 1, deadline)
@@ -74,7 +74,7 @@ def CRG(S: Stats, t: int, J: Dict[int, Tuple], G: Graph, Rs: AgentLoader, N: int
                 if not start_locations:
                     continue
                 
-                deadline = get_deadline(t)
+                deadline = get_deadline(t, deadline_generation_method, deadline_offset)
                 J[last_task_id + 1] = (start_locations, goal_locations, deadline, 0, 0)
                 S.add_task_release(last_task_id + 1, t)
                 S.add_task_deadline(last_task_id + 1, deadline)
@@ -99,7 +99,7 @@ def CRG(S: Stats, t: int, J: Dict[int, Tuple], G: Graph, Rs: AgentLoader, N: int
         for task in tasks_to_generate:
             attempts = 0
             while True:
-                J, success, last_task_id = generate_task(deadline_generation_method, deadline_offset, sku_ids, weights, task, t, last_task_id, allocated_skus, G, J, S)
+                J, success, last_task_id = generate_task(deadline_generation_method, deadline_offset, sku_ids, weights, task, t, last_task_id, allocated_skus, G, J, S, reserved_locations={loc for assigned in Rs.get_all_assigned_tasks() for loc in assigned[1:3]})
                 if success:
                     break
                 attempts += 1
@@ -140,7 +140,7 @@ def CRG(S: Stats, t: int, J: Dict[int, Tuple], G: Graph, Rs: AgentLoader, N: int
         for task in tasks_to_generate:
             attempts = 0
             while True:
-                J, success, last_task_id = generate_task(deadline_generation_method, deadline_offset, sku_ids, weights, task, t, last_task_id, allocated_skus, G, J, S)
+                J, success, last_task_id = generate_task(deadline_generation_method, deadline_offset, sku_ids, weights, task, t, last_task_id, allocated_skus, G, J, S, reserved_locations={loc for assigned in Rs.get_all_assigned_tasks() for loc in assigned[1:3]})
                 if success:
                     break
                 attempts += 1
@@ -157,16 +157,21 @@ def CRG(S: Stats, t: int, J: Dict[int, Tuple], G: Graph, Rs: AgentLoader, N: int
     # print(f"Inbound tasks: {inbound_tasks}")
     # print(f"Number of outbound tasks: {len(outbound_tasks)}")
     # print(f"Number of inbound tasks: {len(inbound_tasks)}")
+    if improvement_task_assign_strategy == "cbta_dcbs":
+        for task_id, entry in J.items():
+            if len(entry) == 5:
+                J[task_id] = (*entry, S.get_generated_task_weight())
+            S.record_task_weight(task_id, J[task_id][5])
     return J, last_task_id, outbound_tasks, inbound_tasks
 
 
-def generate_task(deadline_generation_method : str, deadline_offset : float, sku_ids, weights, task, t : int, last_task_id : int, allocated_skus : dict, G : Graph, J : set, S : Stats) -> bool:
+def generate_task(deadline_generation_method : str, deadline_offset : float, sku_ids, weights, task, t : int, last_task_id : int, allocated_skus : dict, G : Graph, J : set, S : Stats, reserved_locations=()) -> bool:
     # Select SKU based on tasking weights
     sku_id = np.random.choice(sku_ids, p=weights)
     
     if task == 1:  # Inbound task
         # Choose random start location from empty driveway locations
-        available_start_locations = set(G.driveway.get_empty_locations())
+        available_start_locations = set(G.driveway.get_empty_locations()) - set(reserved_locations)
         if not available_start_locations:
             return J, False, last_task_id
         
@@ -260,4 +265,3 @@ def get_deadline(current_time: int, deadline_generation_method : str, deadline_o
     else:
         # Default fallback
         return current_time + 30
-    

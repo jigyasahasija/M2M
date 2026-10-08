@@ -5,8 +5,20 @@ from .agent import *
 from .utils import *
 from .analysis.statistics import *
 from typing import Dict, Tuple
+from .graph import Graph
+from .path_finding_algorithms.dcbs import plan_dcbs
 
-def pathPlan(map : str, Rs : AgentLoader, path_planning_strategy : str, S : Stats) -> AgentLoader:
+def pathPlan(map : str, Rs : AgentLoader, path_planning_strategy : str, S : Stats,
+             G: Graph = None) -> AgentLoader:
+    """Dispatch routing to DCBS, PBS, or EECBS.
+
+    DCBS requires the simulator's graph and returns one action per robot.
+    PBS/EECBS retain their existing map-based interface and full paths.
+    """
+    if path_planning_strategy == "dcbs":
+        if G is None:
+            raise ValueError("DCBS routing requires the simulator graph G")
+        return plan_dcbs(G, Rs, S)
 
     goal_locations = []
     for agent in Rs.agents:

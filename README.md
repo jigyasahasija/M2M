@@ -122,9 +122,9 @@ The script creates output directories (`data/raw_data`, `data/buffer_data`, `dat
 | `weight_init_method` | `uniform` | How SKU weights are initialized |
 | `task_gen_strategy` | `feedback_control` | Task generation strategy; uses inventory feedback to regulate task rate |
 | `initial_task_assign_strategy` | `fast_greedy` | Algorithm used for the initial task assignment |
-| `improvement_task_assign_strategy` | `LNS_PBS` | Algorithm used for iterative improvement (LNS-PBS) |
+| `improvement_task_assign_strategy` | `cbta_dcbs` | Cost-based task assignment with DCBS routing |
 | `cost_calculation_method` | `shortest_path` | How agent travel costs are estimated |
-| `path_planning_strategy` | `pbs` | Multi-agent path planner (Priority-Based Search) |
+| `path_planning_strategy` | `dcbs` | Dynamic conflict-based routing |
 | `map` | `data/maps/study_small_restricted` | Warehouse map file |
 | `removal_operator` | `shaw` | LNS removal heuristic (Shaw removal) |
 | `repair_operator` | `greedy` | LNS repair heuristic |
@@ -139,6 +139,42 @@ The script creates output directories (`data/raw_data`, `data/buffer_data`, `dat
 | `agent_unallocated_penalty` | `5.0` | Penalty applied per unallocated agent |
 
 **Output** — results for each run are written to `data/raw_data/`.
+
+### CBTA/DCBS
+
+Run from the repository root (script arguments override its defaults):
+
+```bash
+PYTHON="$PWD/.venv/bin/python" bash GT_grid_world/run_experiments.sh \
+  --improvement-task-assign-strategy cbta_dcbs --path-planning-strategy dcbs \
+  --agent-capacity 2
+```
+
+CBTA supports multiple carried items with `--agent-capacity` (script default 2).
+Set `--task-weight` for generated tasks (default 1, positive fractions allowed).
+Each assigned task reserves its weight until delivery. Both reserved and carried
+weight must fit the robot's capacity. Overweight tasks remain unassigned. Pickup and
+delivery events can interleave, including items sharing a SKU. With unit weights,
+capacity 1 executes tasks serially. Other strategies require capacity and weight 1.
+Batch scheduling, SSP assignment, and task packaging still differ from the paper.
+
+Cost uses `base_cost_weight` for travel and `deadline_weight` for lateness.
+Set `--deadline-weight 0` to ignore lateness in allocation, or a positive value
+to enable it. Set `--deadline-generation-method none` to disable task deadlines
+and their penalty entirely.
+
+Results in `data/raw_data/` include throughput, computation times, completion
+ratio (completed / generated tasks), and weighted costs for completed tasks.
+Assignment cost estimates are recorded separately from realized costs. Output
+filenames include capacity and task weight, and JSON records each robot’s load and carried task
+IDs per timestep. Travel cost sums per-task travel: a shared move counts for
+each carried item, rather than once for the robot.
+JSON also records per-task weights and carried/reserved weight per timestep.
+Mixed-weight tasks can supply weight as the sixth field of a task in `J`;
+legacy five-field tasks weigh 1. Binary assignment optimization keeps each task
+whole and maximizes assigned task count before minimizing estimated cost.
+
+Tests: `.venv/bin/python -m unittest discover -s GT_grid_world/tests -v`
 
 ---
 
